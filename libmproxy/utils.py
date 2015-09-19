@@ -1,21 +1,10 @@
-# Copyright (C) 2010  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-import os, datetime, urlparse, string, urllib, re
-import time, functools, cgi
+from __future__ import (absolute_import, print_function, division)
+import os
+import datetime
+import re
+import time
 import json
-from netlib import http
+
 
 def timestamp():
     """
@@ -30,19 +19,25 @@ def format_timestamp(s):
     return d.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_timestamp_with_milli(s):
+    d = datetime.datetime.fromtimestamp(s)
+    return d.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 def isBin(s):
     """
         Does this string have any non-ASCII characters?
     """
     for i in s:
         i = ord(i)
-        if i < 9:
-            return True
-        elif i > 13 and i < 32:
-            return True
-        elif i > 126:
+        if i < 9 or 13 < i < 32 or 126 < i:
             return True
     return False
+
+
+def isMostlyBin(s):
+    s = s[:100]
+    return sum(isBin(ch) for ch in s)/len(s) > 0.3
 
 
 def isXML(s):
@@ -60,44 +55,21 @@ def pretty_json(s):
         p = json.loads(s)
     except ValueError:
         return None
-    return json.dumps(p, sort_keys=True, indent=4).split("\n")
+    return json.dumps(p, sort_keys=True, indent=4)
 
 
-def urldecode(s):
-    """
-        Takes a urlencoded string and returns a list of (key, value) tuples.
-    """
-    return cgi.parse_qsl(s, keep_blank_values=True)
-
-
-def urlencode(s):
-    """
-        Takes a list of (key, value) tuples and returns a urlencoded string.
-    """
-    s = [tuple(i) for i in s]
-    return urllib.urlencode(s, False)
-
-
-def del_all(dict, keys):
-    for key in keys:
-        if key in dict:
-            del dict[key]
-
-
-def pretty_size(size):
-    suffixes = [
-        ("B",   2**10),
-        ("kB",   2**20),
-        ("M",   2**30),
+def pretty_duration(secs):
+    formatters = [
+        (100, "{:.0f}s"),
+        (10, "{:2.1f}s"),
+        (1, "{:1.2f}s"),
     ]
-    for suf, lim in suffixes:
-        if size >= lim:
-            continue
-        else:
-            x = round(size/float(lim/2**10), 2)
-            if x == int(x):
-                x = int(x)
-            return str(x) + suf
+
+    for limit, formatter in formatters:
+        if secs >= limit:
+            return formatter.format(secs)
+    # less than 1 sec
+    return "{:.0f}ms".format(secs * 1000)
 
 
 class Data:
@@ -115,98 +87,40 @@ class Data:
         """
         fullpath = os.path.join(self.dirname, path)
         if not os.path.exists(fullpath):
-            raise ValueError, "dataPath: %s does not exist."%fullpath
+            raise ValueError("dataPath: %s does not exist." % fullpath)
         return fullpath
 pkg_data = Data(__name__)
 
 
 class LRUCache:
     """
-        A decorator that implements a self-expiring LRU cache for class
-        methods (not functions!).
-
-        Cache data is tracked as attributes on the object itself. There is
-        therefore a separate cache for each object instance.
+        A simple LRU cache for generated values.
     """
+
     def __init__(self, size=100):
         self.size = size
+        self.cache = {}
+        self.cacheList = []
 
-    def __call__(self, f):
-        cacheName = "_cached_%s"%f.__name__
-        cacheListName = "_cachelist_%s"%f.__name__
-        size = self.size
-
-        @functools.wraps(f)
-        def wrap(self, *args):
-            if not hasattr(self, cacheName):
-                setattr(self, cacheName, {})
-                setattr(self, cacheListName, [])
-            cache = getattr(self, cacheName)
-            cacheList = getattr(self, cacheListName)
-            if cache.has_key(args):
-                cacheList.remove(args)
-                cacheList.insert(0, args)
-                return cache[args]
-            else:
-                ret = f(self, *args)
-                cacheList.insert(0, args)
-                cache[args] = ret
-                if len(cacheList) > size:
-                    d = cacheList.pop()
-                    cache.pop(d)
-                return ret
-        return wrap
-
-
-def parse_proxy_spec(url):
-    p = http.parse_url(url)
-    if not p or not p[1]:
-        return None
-    return p[:3]
-
-
-def parse_content_type(c):
-    """
-        A simple parser for content-type values. Returns a (type, subtype,
-        parameters) tuple, where type and subtype are strings, and parameters
-        is a dict. If the string could not be parsed, return None.
-
-        E.g. the following string:
-
-            text/html; charset=UTF-8
-
-        Returns:
-
-            ("text", "html", {"charset": "UTF-8"})
-    """
-    parts = c.split(";", 1)
-    ts = parts[0].split("/", 1)
-    if len(ts) != 2:
-        return None
-    d = {}
-    if len(parts) == 2:
-        for i in parts[1].split(";"):
-            clause = i.split("=", 1)
-            if len(clause) == 2:
-                d[clause[0].strip()] = clause[1].strip()
-    return ts[0].lower(), ts[1].lower(), d
-
-
-def hostport(scheme, host, port):
-    """
-        Returns the host component, with a port specifcation if needed.
-    """
-    if (port, scheme) in [(80, "http"), (443, "https")]:
-        return host
-    else:
-        return "%s:%s"%(host, port)
-
-
-def unparse_url(scheme, host, port, path=""):
-    """
-        Returns a URL string, constructed from the specified compnents.
-    """
-    return "%s://%s%s"%(scheme, hostport(scheme, host, port), path)
+    def get(self, gen, *args):
+        """
+            gen: A (presumably expensive) generator function. The identity of
+            gen is NOT taken into account by the cache.
+            *args: A list of immutable arguments, used to establish identiy by
+            *the cache, and passed to gen to generate values.
+        """
+        if args in self.cache:
+            self.cacheList.remove(args)
+            self.cacheList.insert(0, args)
+            return self.cache[args]
+        else:
+            ret = gen(*args)
+            self.cacheList.insert(0, args)
+            self.cache[args] = ret
+            if len(self.cacheList) > self.size:
+                d = self.cacheList.pop()
+                self.cache.pop(d)
+            return ret
 
 
 def clean_hanging_newline(t):
@@ -247,7 +161,7 @@ def parse_size(s):
     try:
         return int(s) * mult
     except ValueError:
-        raise ValueError("Invalid size specification: %s"%s)
+        raise ValueError("Invalid size specification: %s" % s)
 
 
 def safe_subn(pattern, repl, target, *args, **kwargs):

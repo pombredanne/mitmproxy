@@ -35,6 +35,24 @@ def test_parse_replace_hook():
     )
 
 
+def test_parse_server_spec():
+    tutils.raises("Invalid server specification", cmdline.parse_server_spec, "")
+    assert cmdline.parse_server_spec(
+        "http://foo.com:88") == ("http", ("foo.com", 88))
+    assert cmdline.parse_server_spec(
+        "http://foo.com") == ("http", ("foo.com", 80))
+    assert cmdline.parse_server_spec(
+        "https://foo.com") == ("https", ("foo.com", 443))
+    tutils.raises(
+        "Invalid server specification",
+        cmdline.parse_server_spec,
+        "foo.com")
+    tutils.raises(
+        "Invalid server specification",
+        cmdline.parse_server_spec,
+        "http://")
+
+
 def test_parse_setheaders():
     x = cmdline.parse_setheader("/foo/bar/voing")
     assert x == ("foo", "bar", "voing")
@@ -92,8 +110,22 @@ def test_common():
     )
 
     p = tutils.test_data.path("data/replace")
-    opts.replace_file = [("/foo/bar/%s"%p)]
+    opts.replace_file = [("/foo/bar/%s" % p)]
     v = cmdline.get_common_options(opts)["replacements"]
     assert len(v) == 1
     assert v[0][2].strip() == "replacecontents"
 
+
+def test_mitmproxy():
+    ap = cmdline.mitmproxy()
+    assert ap
+
+
+def test_mitmdump():
+    ap = cmdline.mitmdump()
+    assert ap
+
+
+def test_mitmweb():
+    ap = cmdline.mitmweb()
+    assert ap

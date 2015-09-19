@@ -1,5 +1,9 @@
 import cStringIO
 from libmproxy import filt, flow
+from libmproxy.protocol import http
+from libmproxy.models import Error
+from netlib.http import Headers
+import tutils
 
 
 class TestParsing:
@@ -72,41 +76,42 @@ class TestParsing:
 
 class TestMatching:
     def req(self):
-        conn = flow.ClientConnect(("one", 2222))
-        headers = flow.ODictCaseless()
-        headers["header"] = ["qvalue"]
-        req = flow.Request(
-                    conn,
-                    (1, 1),
-                    "host",
-                    80,
-                    "http",
-                    "GET",
-                    "/path",
-                    headers,
-                    "content_request"
+        headers = Headers(header="qvalue")
+        req = http.HTTPRequest(
+            "absolute",
+            "GET",
+            "http",
+            "host",
+            80,
+            "/path",
+            b"HTTP/1.1",
+            headers,
+            "content_request",
+            None,
+            None
         )
-        return flow.Flow(req)
+        f = http.HTTPFlow(tutils.tclient_conn(), None)
+        f.request = req
+        return f
 
     def resp(self):
         f = self.req()
 
-        headers = flow.ODictCaseless()
-        headers["header_response"] = ["svalue"]
-        f.response = flow.Response(
-                    f.request,
-                    (1, 1),
-                    200,
-                    "message",
-                    headers,
-                    "content_response",
-                    None
-                )
+        headers = Headers([["header_response", "svalue"]])
+        f.response = http.HTTPResponse(
+            b"HTTP/1.1",
+            200,
+            "OK",
+            headers,
+            "content_response",
+            None,
+            None)
+
         return f
 
     def err(self):
         f = self.req()
-        f.error = flow.Error(f.request, "msg")
+        f.error = Error("msg")
         return f
 
     def q(self, q, o):
@@ -115,7 +120,7 @@ class TestMatching:
     def test_asset(self):
         s = self.resp()
         assert not self.q("~a", s)
-        s.response.headers["content-type"] = ["text/javascript"]
+        s.response.headers["content-type"] = "text/javascript"
         assert self.q("~a", s)
 
     def test_fcontenttype(self):
@@ -124,16 +129,16 @@ class TestMatching:
         assert not self.q("~t content", q)
         assert not self.q("~t content", s)
 
-        q.request.headers["content-type"] = ["text/json"]
+        q.request.headers["content-type"] = "text/json"
         assert self.q("~t json", q)
         assert self.q("~tq json", q)
         assert not self.q("~ts json", q)
 
-        s.response.headers["content-type"] = ["text/json"]
+        s.response.headers["content-type"] = "text/json"
         assert self.q("~t json", s)
 
         del s.response.headers["content-type"]
-        s.request.headers["content-type"] = ["text/json"]
+        s.request.headers["content-type"] = "text/json"
         assert self.q("~t json", s)
         assert self.q("~tq json", s)
         assert not self.q("~ts json", s)
@@ -173,9 +178,7 @@ class TestMatching:
         assert self.q("~hs 'header_response: svalue'", s)
         assert not self.q("~hs 'header: qvalue'", q)
 
-    def test_body(self):
-        q = self.req()
-        s = self.resp()
+    def match_body(self, q, s):
         assert not self.q("~b nonexistent", q)
         assert self.q("~b content", q)
         assert self.q("~b response", s)
@@ -191,6 +194,16 @@ class TestMatching:
         assert not self.q("~bs nomatch", s)
         assert not self.q("~bs response", q)
         assert self.q("~bs response", s)
+
+    def test_body(self):
+        q = self.req()
+        s = self.resp()
+        self.match_body(q, s)
+
+        q.request.encode("gzip")
+        s.request.encode("gzip")
+        s.response.encode("gzip")
+        self.match_body(q, s)
 
     def test_method(self):
         q = self.req()
@@ -225,6 +238,23 @@ class TestMatching:
         assert self.q("~c 200", s)
         assert not self.q("~c 201", s)
 
+    def test_src(self):
+        q = self.req()
+        assert self.q("~src address", q)
+        assert not self.q("~src foobar", q)
+        assert self.q("~src :22", q)
+        assert not self.q("~src :99", q)
+        assert self.q("~src address:22", q)
+
+    def test_dst(self):
+        q = self.req()
+        q.server_conn = tutils.tserver_conn()
+        assert self.q("~dst address", q)
+        assert not self.q("~dst foobar", q)
+        assert self.q("~dst :22", q)
+        assert not self.q("~dst :99", q)
+        assert self.q("~dst address:22", q)
+
     def test_and(self):
         s = self.resp()
         assert self.q("~c 200 & ~h head", s)
@@ -247,4 +277,3 @@ class TestMatching:
         assert self.q("! ~c 201", s)
         assert self.q("!~c 201 !~c 202", s)
         assert not self.q("!~c 201 !~c 200", s)
-

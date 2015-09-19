@@ -1,10 +1,9 @@
-include LICENSE
-include CHANGELOG
-include CONTRIBUTORS
-include README.txt
-exclude README.mkd
+include mitmproxy mitmdump
+include LICENSE CHANGELOG CONTRIBUTORS README.rst
 recursive-include examples *
 recursive-include doc *
 recursive-include test *
-recursive-include libmproxy/resources *
-recursive-exclude test *.swo *.swp *.pyc
+recursive-include libmproxy *
+recursive-exclude * *.pyc *.pyo *.swo *.swp
+recursive-exclude netlib *
+recursive-exclude libpathod *

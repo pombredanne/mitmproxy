@@ -1,40 +1,60 @@
-# Copyright (C) 2012  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+from __future__ import absolute_import
 
 import urwid
 import urwid.util
-from .. import utils, flow
+import os
 
+from netlib.http import CONTENT_MISSING
+import netlib.utils
+
+from .. import utils
+from ..models import decoded
+from . import signals
+
+
+try:
+    import pyperclip
+except:
+    pyperclip = False
 
 
 VIEW_FLOW_REQUEST = 0
 VIEW_FLOW_RESPONSE = 1
 
+METHOD_OPTIONS = [
+    ("get", "g"),
+    ("post", "p"),
+    ("put", "u"),
+    ("head", "h"),
+    ("trace", "t"),
+    ("delete", "d"),
+    ("options", "o"),
+    ("edit raw", "e"),
+]
 
-def highlight_key(s, k):
+
+def is_keypress(k):
+    """
+        Is this input event a keypress?
+    """
+    if isinstance(k, basestring):
+        return True
+
+
+def highlight_key(str, key, textattr="text", keyattr="key"):
     l = []
-    parts = s.split(k, 1)
+    parts = str.split(key, 1)
     if parts[0]:
-        l.append(("text", parts[0]))
-    l.append(("key", k))
+        l.append((textattr, parts[0]))
+    l.append((keyattr, key))
     if parts[1]:
-        l.append(("text", parts[1]))
+        l.append((textattr, parts[1]))
     return l
 
 
 KEY_MAX = 30
+
+
 def format_keyvals(lst, key="key", val="text", indent=0):
     """
         Format a list of (key, value) tuples.
@@ -50,20 +70,26 @@ def format_keyvals(lst, key="key", val="text", indent=0):
             if kv is None:
                 ret.append(urwid.Text(""))
             else:
-                cols = []
-                # This cumbersome construction process is here for a reason:
-                # Urwid < 1.0 barfs if given a fixed size column of size zero.
-                if indent:
-                    cols.append(("fixed", indent, urwid.Text("")))
-                cols.extend([
-                    (
-                        "fixed",
-                        maxk,
-                        urwid.Text([(key, kv[0] or "")])
-                    ),
-                    kv[1] if isinstance(kv[1], urwid.Widget) else urwid.Text([(val, kv[1])])
-               ])
-                ret.append(urwid.Columns(cols, dividechars = 2))
+                if isinstance(kv[1], urwid.Widget):
+                    v = kv[1]
+                elif kv[1] is None:
+                    v = urwid.Text("")
+                else:
+                    v = urwid.Text([(val, kv[1])])
+                ret.append(
+                    urwid.Columns(
+                        [
+                            ("fixed", indent, urwid.Text("")),
+                            (
+                                "fixed",
+                                maxk,
+                                urwid.Text([(key, kv[0] or "")])
+                            ),
+                            v
+                        ],
+                        dividechars = 2
+                    )
+                )
     return ret
 
 
@@ -92,15 +118,15 @@ def fcol(s, attr):
 if urwid.util.detected_encoding:
     SYMBOL_REPLAY = u"\u21ba"
     SYMBOL_RETURN = u"\u2190"
+    SYMBOL_MARK = u"\u25cf"
 else:
     SYMBOL_REPLAY = u"[r]"
     SYMBOL_RETURN = u"<-"
-
+    SYMBOL_MARK = "[m]"
 
 
 def raw_format_flow(f, focus, extended, padding):
     f = dict(f)
-
     pile = []
     req = []
     if extended:
@@ -112,13 +138,17 @@ def raw_format_flow(f, focus, extended, padding):
         )
     else:
         req.append(fcol(">>" if focus else "  ", "focus"))
+
+    if f["marked"]:
+        req.append(fcol(SYMBOL_MARK, "mark"))
+
     if f["req_is_replay"]:
         req.append(fcol(SYMBOL_REPLAY, "replay"))
     req.append(fcol(f["req_method"], "method"))
 
-    preamble = sum(i[1] for i in req) + len(req) -1
+    preamble = sum(i[1] for i in req) + len(req) - 1
 
-    if f["intercepting"] and not f["req_acked"]:
+    if f["intercepted"] and not f["acked"]:
         uc = "intercept"
     elif f["resp_code"] or f["err_msg"]:
         uc = "text"
@@ -143,12 +173,12 @@ def raw_format_flow(f, focus, extended, padding):
             4: "code_400",
             5: "code_500",
         }
-        ccol = codes.get(f["resp_code"]/100, "code_other")
+        ccol = codes.get(f["resp_code"] / 100, "code_other")
         resp.append(fcol(SYMBOL_RETURN, ccol))
         if f["resp_is_replay"]:
             resp.append(fcol(SYMBOL_REPLAY, "replay"))
         resp.append(fcol(f["resp_code"], ccol))
-        if f["intercepting"] and f["resp_code"] and not f["resp_acked"]:
+        if f["intercepted"] and f["resp_code"] and not f["acked"]:
             rc = "intercept"
         else:
             rc = "text"
@@ -156,6 +186,8 @@ def raw_format_flow(f, focus, extended, padding):
         if f["resp_ctype"]:
             resp.append(fcol(f["resp_ctype"], rc))
         resp.append(fcol(f["resp_clen"], rc))
+        resp.append(fcol(f["roundtrip"], rc))
+
     elif f["err_msg"]:
         resp.append(fcol(SYMBOL_RETURN, "error"))
         resp.append(
@@ -170,65 +202,225 @@ def raw_format_flow(f, focus, extended, padding):
     return urwid.Pile(pile)
 
 
-class FlowCache:
-    @utils.LRUCache(200)
-    def format_flow(self, *args):
-        return raw_format_flow(*args)
-flowcache = FlowCache()
+# Save file to disk
+def save_data(path, data, master, state):
+    if not path:
+        return
+    try:
+        with file(path, "wb") as f:
+            f.write(data)
+    except IOError as v:
+        signals.status_message.send(message=v.strerror)
 
 
-def format_flow(f, focus, extended=False, hostheader=False, padding=2):
+def ask_save_overwite(path, data, master, state):
+    if not path:
+        return
+    path = os.path.expanduser(path)
+    if os.path.exists(path):
+        def save_overwite(k):
+            if k == "y":
+                save_data(path, data, master, state)
+
+        signals.status_prompt_onekey.send(
+            prompt = "'" + path + "' already exists. Overwite?",
+            keys = (
+                ("yes", "y"),
+                ("no", "n"),
+            ),
+            callback = save_overwite
+        )
+    else:
+        save_data(path, data, master, state)
+
+
+def ask_save_path(prompt, data, master, state):
+    signals.status_prompt_path.send(
+        prompt = prompt,
+        callback = ask_save_overwite,
+        args = (data, master, state)
+    )
+
+
+def copy_flow_format_data(part, scope, flow):
+    if part == "u":
+        data = flow.request.url
+    else:
+        data = ""
+        if scope in ("q", "a"):
+            if flow.request.content is None or flow.request.content == CONTENT_MISSING:
+                return None, "Request content is missing"
+            with decoded(flow.request):
+                if part == "h":
+                    data += flow.client_conn.protocol.assemble(flow.request)
+                elif part == "c":
+                    data += flow.request.content
+                else:
+                    raise ValueError("Unknown part: {}".format(part))
+        if scope == "a" and flow.request.content and flow.response:
+            # Add padding between request and response
+            data += "\r\n" * 2
+        if scope in ("s", "a") and flow.response:
+            if flow.response.content is None or flow.response.content == CONTENT_MISSING:
+                return None, "Response content is missing"
+            with decoded(flow.response):
+                if part == "h":
+                    data += flow.client_conn.protocol.assemble(flow.response)
+                elif part == "c":
+                    data += flow.response.content
+                else:
+                    raise ValueError("Unknown part: {}".format(part))
+    return data, False
+
+
+def copy_flow(part, scope, flow, master, state):
+    """
+    part: _c_ontent, _h_eaders+content, _u_rl
+    scope: _a_ll, re_q_uest, re_s_ponse
+    """
+    data, err = copy_flow_format_data(part, scope, flow)
+
+    if err:
+        signals.status_message.send(message=err)
+        return
+
+    if not data:
+        if scope == "q":
+            signals.status_message.send(message="No request content to copy.")
+        elif scope == "s":
+            signals.status_message.send(message="No response content to copy.")
+        else:
+            signals.status_message.send(message="No contents to copy.")
+        return
+
+    # pyperclip calls encode('utf-8') on data to be copied without checking.
+    # if data are already encoded that way UnicodeDecodeError is thrown.
+    toclip = ""
+    try:
+        toclip = data.decode('utf-8')
+    except (UnicodeDecodeError):
+        toclip = data
+
+    try:
+        pyperclip.copy(toclip)
+    except (RuntimeError, UnicodeDecodeError, AttributeError):
+        def save(k):
+            if k == "y":
+                ask_save_path("Save data", data, master, state)
+        signals.status_prompt_onekey.send(
+            prompt = "Cannot copy data to clipboard. Save as file?",
+            keys = (
+                ("yes", "y"),
+                ("no", "n"),
+            ),
+            callback = save
+        )
+
+
+def ask_copy_part(scope, flow, master, state):
+    choices = [
+        ("content", "c"),
+        ("headers+content", "h")
+    ]
+    if scope != "s":
+        choices.append(("url", "u"))
+
+    signals.status_prompt_onekey.send(
+        prompt = "Copy",
+        keys = choices,
+        callback = copy_flow,
+        args = (scope, flow, master, state)
+    )
+
+
+def ask_save_body(part, master, state, flow):
+    """
+    Save either the request or the response body to disk. part can either be
+    "q" (request), "s" (response) or None (ask user if necessary).
+    """
+
+    request_has_content = flow.request and flow.request.content
+    response_has_content = flow.response and flow.response.content
+
+    if part is None:
+        # We first need to determine whether we want to save the request or the
+        # response content.
+        if request_has_content and response_has_content:
+            signals.status_prompt_onekey.send(
+                prompt = "Save",
+                keys = (
+                    ("request", "q"),
+                    ("response", "s"),
+                ),
+                callback = ask_save_body,
+                args = (master, state, flow)
+            )
+        elif response_has_content:
+            ask_save_body("s", master, state, flow)
+        else:
+            ask_save_body("q", master, state, flow)
+
+    elif part == "q" and request_has_content:
+        ask_save_path(
+            "Save request content",
+            flow.request.get_decoded_content(),
+            master,
+            state
+        )
+    elif part == "s" and response_has_content:
+        ask_save_path(
+            "Save response content",
+            flow.response.get_decoded_content(),
+            master,
+            state
+        )
+    else:
+        signals.status_message.send(message="No content to save.")
+
+
+flowcache = utils.LRUCache(800)
+
+
+def format_flow(f, focus, extended=False, hostheader=False, padding=2,
+        marked=False):
     d = dict(
-        intercepting = f.intercepting,
+        intercepted = f.intercepted,
+        acked = f.reply.acked,
 
         req_timestamp = f.request.timestamp_start,
-        req_is_replay = f.request.is_replay(),
+        req_is_replay = f.request.is_replay,
         req_method = f.request.method,
-        req_acked = f.request.reply.acked,
-        req_url = f.request.get_url(hostheader=hostheader),
+        req_url = f.request.pretty_url(hostheader=hostheader),
 
         err_msg = f.error.msg if f.error else None,
-        resp_code = f.response.code if f.response else None,
+        resp_code = f.response.status_code if f.response else None,
+
+        marked = marked,
     )
     if f.response:
         if f.response.content:
-            contentdesc = utils.pretty_size(len(f.response.content))
-        elif f.response.content == flow.CONTENT_MISSING:
+            contentdesc = netlib.utils.pretty_size(len(f.response.content))
+        elif f.response.content == CONTENT_MISSING:
             contentdesc = "[content missing]"
         else:
             contentdesc = "[no content]"
+        duration = 0
+        if f.response.timestamp_end and f.request.timestamp_start:
+            duration = f.response.timestamp_end - f.request.timestamp_start
+        roundtrip = utils.pretty_duration(duration)
+
         d.update(dict(
-            resp_code = f.response.code,
-            resp_is_replay = f.response.is_replay(),
-            resp_acked = f.response.reply.acked,
-            resp_clen = contentdesc
+            resp_code = f.response.status_code,
+            resp_is_replay = f.response.is_replay,
+            resp_clen = contentdesc,
+            roundtrip = roundtrip,
         ))
-        t = f.response.headers["content-type"]
+        t = f.response.headers.get("content-type")
         if t:
-            d["resp_ctype"] = t[0].split(";")[0]
+            d["resp_ctype"] = t.split(";")[0]
         else:
             d["resp_ctype"] = ""
-    return flowcache.format_flow(tuple(sorted(d.items())), focus, extended, padding)
-
-
-
-def int_version(v):
-    SIG = 3
-    v = urwid.__version__.split("-")[0].split(".")
-    x = 0
-    for i in range(min(SIG, len(v))):
-        x += int(v[i]) * 10**(SIG-i)
-    return x
-
-
-# We have to do this to be portable over 0.9.8 and 0.9.9 If compatibility
-# becomes a pain to maintain, we'll just mandate 0.9.9 or newer.
-class WWrap(urwid.WidgetWrap):
-    if int_version(urwid.__version__) >= 990:
-        def set_w(self, x):
-            self._w = x
-        def get_w(self):
-            return self._w
-        w = property(get_w, set_w)
-
-
+    return flowcache.get(
+        raw_format_flow,
+        tuple(sorted(d.items())), focus, extended, padding
+    )

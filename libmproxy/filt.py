@@ -1,18 +1,3 @@
-# Copyright (C) 2010  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 """
     The following operators are understood:
 
@@ -46,15 +31,17 @@
         ~c CODE     Response code.
         rex         Equivalent to ~u rex
 """
-import re, sys
-import contrib.pyparsing as pp
+from __future__ import absolute_import
+import re
+import sys
+import pyparsing as pp
 
 
 class _Token:
     def dump(self, indent=0, fp=sys.stdout):
-        print >> fp, "\t"*indent, self.__class__.__name__,
+        print >> fp, "\t" * indent, self.__class__.__name__,
         if hasattr(self, "expr"):
-            print >> fp, "(%s)"%self.expr,
+            print >> fp, "(%s)" % self.expr,
         print >> fp
 
 
@@ -67,6 +54,7 @@ class _Action(_Token):
 class FErr(_Action):
     code = "e"
     help = "Match error"
+
     def __call__(self, f):
         return True if f.error else False
 
@@ -74,6 +62,7 @@ class FErr(_Action):
 class FReq(_Action):
     code = "q"
     help = "Match request with no response"
+
     def __call__(self, f):
         if not f.response:
             return True
@@ -82,22 +71,25 @@ class FReq(_Action):
 class FResp(_Action):
     code = "s"
     help = "Match response"
+
     def __call__(self, f):
         return True if f.response else False
 
 
 class _Rex(_Action):
+    flags = 0
+
     def __init__(self, expr):
         self.expr = expr
         try:
-            self.re = re.compile(self.expr)
+            self.re = re.compile(self.expr, self.flags)
         except:
-            raise ValueError, "Cannot compile expression."
+            raise ValueError("Cannot compile expression.")
 
 
 def _check_content_type(expr, o):
-    val = o.headers["content-type"]
-    if val and re.search(expr, val[0]):
+    val = o.headers.get("content-type")
+    if val and re.search(expr, val):
         return True
     return False
 
@@ -113,6 +105,7 @@ class FAsset(_Action):
         "image/.*",
         "application/x-shockwave-flash"
     ]
+
     def __call__(self, f):
         if f.response:
             for i in self.ASSET_TYPES:
@@ -124,6 +117,7 @@ class FAsset(_Action):
 class FContentType(_Rex):
     code = "t"
     help = "Content-type header"
+
     def __call__(self, f):
         if _check_content_type(self.expr, f.request):
             return True
@@ -135,6 +129,7 @@ class FContentType(_Rex):
 class FRequestContentType(_Rex):
     code = "tq"
     help = "Request Content-Type header"
+
     def __call__(self, f):
         return _check_content_type(self.expr, f.request)
 
@@ -142,6 +137,7 @@ class FRequestContentType(_Rex):
 class FResponseContentType(_Rex):
     code = "ts"
     help = "Response Content-Type header"
+
     def __call__(self, f):
         if f.response:
             return _check_content_type(self.expr, f.response)
@@ -151,10 +147,12 @@ class FResponseContentType(_Rex):
 class FHead(_Rex):
     code = "h"
     help = "Header"
+    flags = re.MULTILINE
+
     def __call__(self, f):
-        if f.request.headers.match_re(self.expr):
+        if f.request and self.re.search(str(f.request.headers)):
             return True
-        elif f.response and f.response.headers.match_re(self.expr):
+        if f.response and self.re.search(str(f.response.headers)):
             return True
         return False
 
@@ -162,64 +160,80 @@ class FHead(_Rex):
 class FHeadRequest(_Rex):
     code = "hq"
     help = "Request header"
+    flags = re.MULTILINE
+
     def __call__(self, f):
-        if f.request.headers.match_re(self.expr):
+        if f.request and self.re.search(str(f.request.headers)):
             return True
 
 
 class FHeadResponse(_Rex):
     code = "hs"
     help = "Response header"
+    flags = re.MULTILINE
+
     def __call__(self, f):
-        if f.response and f.response.headers.match_re(self.expr):
+        if f.response and self.re.search(str(f.response.headers)):
             return True
 
 
 class FBod(_Rex):
     code = "b"
     help = "Body"
+
     def __call__(self, f):
-        if f.request.content and re.search(self.expr, f.request.content):
-            return True
-        elif f.response and f.response.content and re.search(self.expr, f.response.content):
-            return True
+        if f.request and f.request.content:
+            if self.re.search(f.request.get_decoded_content()):
+                return True
+        if f.response and f.response.content:
+            if self.re.search(f.response.get_decoded_content()):
+                return True
         return False
 
 
 class FBodRequest(_Rex):
     code = "bq"
     help = "Request body"
+
     def __call__(self, f):
-        if f.request.content and re.search(self.expr, f.request.content):
-            return True
+        if f.request and f.request.content:
+            if self.re.search(f.request.get_decoded_content()):
+                return True
 
 
 class FBodResponse(_Rex):
     code = "bs"
     help = "Response body"
+
     def __call__(self, f):
-        if f.response and f.response.content and re.search(self.expr, f.response.content):
-            return True
+        if f.response and f.response.content:
+            if self.re.search(f.response.get_decoded_content()):
+                return True
 
 
 class FMethod(_Rex):
     code = "m"
     help = "Method"
+    flags = re.IGNORECASE
+
     def __call__(self, f):
-        return bool(re.search(self.expr, f.request.method, re.IGNORECASE))
+        return bool(self.re.search(f.request.method))
 
 
 class FDomain(_Rex):
     code = "d"
     help = "Domain"
+    flags = re.IGNORECASE
+
     def __call__(self, f):
-        return bool(re.search(self.expr, f.request.host, re.IGNORECASE))
+        return bool(self.re.search(f.request.host))
 
 
 class FUrl(_Rex):
     code = "u"
     help = "URL"
     # FUrl is special, because it can be "naked".
+
     @classmethod
     def make(klass, s, loc, toks):
         if len(toks) > 1:
@@ -227,7 +241,23 @@ class FUrl(_Rex):
         return klass(*toks)
 
     def __call__(self, f):
-        return re.search(self.expr, f.request.get_url())
+        return self.re.search(f.request.url)
+
+
+class FSrc(_Rex):
+    code = "src"
+    help = "Match source address"
+
+    def __call__(self, f):
+        return f.client_conn.address and self.re.search(repr(f.client_conn.address))
+
+
+class FDst(_Rex):
+    code = "dst"
+    help = "Match destination address"
+
+    def __call__(self, f):
+        return f.server_conn.address and self.re.search(repr(f.server_conn.address))
 
 
 class _Int(_Action):
@@ -238,8 +268,9 @@ class _Int(_Action):
 class FCode(_Int):
     code = "c"
     help = "HTTP response code"
+
     def __call__(self, f):
-        if f.response and f.response.code == self.num:
+        if f.response and f.response.status_code == self.num:
             return True
 
 
@@ -248,9 +279,9 @@ class FAnd(_Token):
         self.lst = lst
 
     def dump(self, indent=0, fp=sys.stdout):
-        print >> fp, "\t"*indent, self.__class__.__name__
+        print >> fp, "\t" * indent, self.__class__.__name__
         for i in self.lst:
-            i.dump(indent+1, fp)
+            i.dump(indent + 1, fp)
 
     def __call__(self, f):
         return all(i(f) for i in self.lst)
@@ -261,9 +292,9 @@ class FOr(_Token):
         self.lst = lst
 
     def dump(self, indent=0, fp=sys.stdout):
-        print >> fp, "\t"*indent, self.__class__.__name__
+        print >> fp, "\t" * indent, self.__class__.__name__
         for i in self.lst:
-            i.dump(indent+1, fp)
+            i.dump(indent + 1, fp)
 
     def __call__(self, f):
         return any(i(f) for i in self.lst)
@@ -274,7 +305,7 @@ class FNot(_Token):
         self.itm = itm[0]
 
     def dump(self, indent=0, fp=sys.stdout):
-        print >> fp, "\t"*indent, self.__class__.__name__
+        print >> fp, "\t" * indent, self.__class__.__name__
         self.itm.dump(indent + 1, fp)
 
     def __call__(self, f):
@@ -300,30 +331,34 @@ filt_rex = [
     FRequestContentType,
     FResponseContentType,
     FContentType,
+    FSrc,
+    FDst,
 ]
 filt_int = [
     FCode
 ]
+
+
 def _make():
     # Order is important - multi-char expressions need to come before narrow
     # ones.
     parts = []
     for klass in filt_unary:
-        f = pp.Literal("~%s"%klass.code)
+        f = pp.Literal("~%s" % klass.code) + pp.WordEnd()
         f.setParseAction(klass.make)
         parts.append(f)
 
-    simplerex = "".join(c for c in pp.printables if c not in  "()~'\"")
+    simplerex = "".join(c for c in pp.printables if c not in "()~'\"")
     rex = pp.Word(simplerex) |\
-          pp.QuotedString("\"", escChar='\\') |\
-          pp.QuotedString("'", escChar='\\')
+        pp.QuotedString("\"", escChar='\\') |\
+        pp.QuotedString("'", escChar='\\')
     for klass in filt_rex:
-        f = pp.Literal("~%s"%klass.code) + rex.copy()
+        f = pp.Literal("~%s" % klass.code) + pp.WordEnd() + rex.copy()
         f.setParseAction(klass.make)
         parts.append(f)
 
     for klass in filt_int:
-        f = pp.Literal("~%s"%klass.code) + pp.Word(pp.nums)
+        f = pp.Literal("~%s" % klass.code) + pp.WordEnd() + pp.Word(pp.nums)
         f.setParseAction(klass.make)
         parts.append(f)
 
@@ -333,14 +368,20 @@ def _make():
     parts.append(f)
 
     atom = pp.MatchFirst(parts)
-    expr = pp.operatorPrecedence(
-                atom,
-                [
-                    (pp.Literal("!").suppress(), 1, pp.opAssoc.RIGHT, lambda x: FNot(*x)),
-                    (pp.Literal("&").suppress(), 2, pp.opAssoc.LEFT, lambda x: FAnd(*x)),
-                    (pp.Literal("|").suppress(), 2, pp.opAssoc.LEFT, lambda x: FOr(*x)),
-                ]
-           )
+    expr = pp.operatorPrecedence(atom,
+                                 [(pp.Literal("!").suppress(),
+                                   1,
+                                   pp.opAssoc.RIGHT,
+                                   lambda x: FNot(*x)),
+                                     (pp.Literal("&").suppress(),
+                                      2,
+                                      pp.opAssoc.LEFT,
+                                      lambda x: FAnd(*x)),
+                                     (pp.Literal("|").suppress(),
+                                      2,
+                                      pp.opAssoc.LEFT,
+                                      lambda x: FOr(*x)),
+                                  ])
     expr = pp.OneOrMore(expr)
     return expr.setParseAction(lambda x: FAnd(x) if len(x) != 1 else x)
 bnf = _make()
@@ -348,9 +389,34 @@ bnf = _make()
 
 def parse(s):
     try:
-        return bnf.parseString(s, parseAll=True)[0]
-    except pp.ParseException, v:
+        filt = bnf.parseString(s, parseAll=True)[0]
+        filt.pattern = s
+        return filt
+    except pp.ParseException:
         return None
     except ValueError:
         return None
 
+
+help = []
+for i in filt_unary:
+    help.append(
+        ("~%s" % i.code, i.help)
+    )
+for i in filt_rex:
+    help.append(
+        ("~%s regex" % i.code, i.help)
+    )
+for i in filt_int:
+    help.append(
+        ("~%s int" % i.code, i.help)
+    )
+help.sort()
+help.extend(
+    [
+        ("!", "unary not"),
+        ("&", "and"),
+        ("|", "or"),
+        ("(...)", "grouping"),
+    ]
+)
